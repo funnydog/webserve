@@ -17,4 +17,4 @@ serve: serve.o fsdata.o base64.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LIBS)
 
 clean:
-	@rm -f *.o *~ serve
+	@rm -f *.o *~ serve fsdata.c
