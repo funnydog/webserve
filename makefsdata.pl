@@ -11,12 +11,15 @@ chdir("fs");
 sub printhexstr {
     my ($out, $comment, $str, $zero) = @_;
 
-    print $out "\t/* $comment */\n" if $comment;
-    print $out "\t";
+    print $out "\n\t/* $comment */" if $comment;
 
     for (my $i = 0; $i < length($str); $i++) {
-	print $out "\n\t" if $i != 0 && $i % 10 == 0;
-	printf $out "%#.02x, ", unpack("C", substr($str, $i, 1));
+	if ($i % 10 == 0) {
+	    print $out "\n\t";
+	} else {
+	    print $out " ";
+	}
+	printf $out "0x%02x,", unpack("C", substr($str, $i, 1));
     }
 
     print $out "0x00," if $zero // 0;
@@ -26,21 +29,24 @@ sub printhexstr {
 sub printhexfile {
     my ($out, $comment, $path) = @_;
 
-    open my $fh, "<", $path or die "Cannot read '$path': $!\n";
+    open my $fh, "<", $path or die "Cannot read '$path': $!";
 
-    print $out "\t/* $comment */\n" if $comment;
-    print $out "\t";
+    print $out "\n\t/* $comment */" if $comment;
 
     my $i = 0;
     my $data;
     while(read($fh, $data, 1)) {
-	print $out "\n\t" if $i != 0 && $i % 10 == 0;
-        printf $out "%#.02x, ", unpack("C", $data);
+	if ($i % 10 == 0) {
+	    print $out "\n\t";
+	} else {
+	    print $out " ";
+	}
+        printf $out "0x%02x,", unpack("C", $data);
 	$i++;
     }
-    close $fh;
-
     print $out "\n";
+
+    close $fh;
 }
 
 sub get_content_type {
@@ -86,7 +92,7 @@ while(my $file = <$filelist>) {
     $fvar =~ s-/-_-g;
     $fvar =~ s-\.-_-g;
 
-    print $out "static const uint8_t data".$fvar."[] = {\n";
+    print $out "static const uint8_t data".$fvar."[] = {";
 
     printhexstr($out, $abspath, $abspath, 1);
     printhexstr($out, "header", $header);
