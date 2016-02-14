@@ -6,17 +6,47 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <mbedtls/config.h>
+#include <mbedtls/certs.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/debug.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net.h>
+#include <mbedtls/ssl.h>
+
+#include "certs.h"
 #include "base64.h"
 #include "fsdata.h"
 
 #define BIND_PORT 8080
 #define MAXCLIENTS 4
 
-static fd_set rfds;
-static int cfd[MAXCLIENTS];
+static const char *seed = "this is a secret!!1";
+
+static struct client
+{
+	mbedtls_net_context fd;
+	mbedtls_ssl_context ssl;
+	int (*handler)(struct client *);
+} ctls[MAXCLIENTS];
 static size_t ccnt;
 
+static fd_set rfds;
 static char rbuf[1024];
+
+/* TLS variables */
+static struct
+{
+	mbedtls_net_context fd;
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context ctr_drbg;
+	mbedtls_ssl_config conf;
+	mbedtls_x509_crt cacert;
+	mbedtls_x509_crt srvcert;
+	mbedtls_pk_context pkey;
+} stls;
+
 static const char *res_200 = "HTTP/1.0 200 OK\r\n";
 static const char *res_401 =
 	"HTTP/1.0 401 Access Denied\r\n"
@@ -28,47 +58,81 @@ static const char *res_500 = "HTTP/1.0 500 Server Error\r\n";
 
 static const char *authres = "Authorization: Basic ";
 
-static int server_listen(uint16_t port)
+static void tls_debug(void *ctx, int level, const char *file, int line, const char *str)
 {
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0) {
-		printf("socket call failed\n");
+	printf("%s:%04d: %s\n", file, line, str);
+}
+
+static int tls_server_listen(const char *port)
+{
+	mbedtls_net_init(&stls.fd);
+	mbedtls_entropy_init(&stls.entropy);
+	mbedtls_ctr_drbg_init(&stls.ctr_drbg);
+	mbedtls_ssl_config_init(&stls.conf);
+	mbedtls_x509_crt_init(&stls.cacert);
+	mbedtls_x509_crt_init(&stls.srvcert);
+	mbedtls_pk_init(&stls.pkey);
+
+	int ret = mbedtls_ctr_drbg_seed(
+		&stls.ctr_drbg,
+		mbedtls_entropy_func,
+		&stls.entropy,
+		(uint8_t*)seed, strlen(seed));
+	if (ret)
+		return -1;
+
+	ret = mbedtls_x509_crt_parse(&stls.cacert, ca_cert, ca_cert_len);
+	if (ret) {
+		printf("cacert parse failed\n");
 		return -1;
 	}
 
-	int opt = 1;
-	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-		printf("unable to se SO_REUSEADDR\n");
-		goto err_close;
+	ret = mbedtls_x509_crt_parse(&stls.srvcert, server_cert, server_cert_len);
+	if (ret) {
+		printf("servercert parse failed\n");
+		return -1;
 	}
 
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-		.sin_port = htons(port),
-	};
-
-	if (bind(fd, (void *)&sa, sizeof(sa)) < 0) {
-		printf("bind call failed\n");
-		goto err_close;
+	ret = mbedtls_pk_parse_key(&stls.pkey, server_key, server_key_len, NULL, 0);
+	if (ret) {
+		printf("key parse failed\n");
+		return -1;
 	}
 
-	if (listen(fd, 20) < 0) {
-		printf("listen call failed");
-		goto err_close;
+	ret = mbedtls_ssl_config_defaults(
+		&stls.conf,
+		MBEDTLS_SSL_IS_SERVER,
+		MBEDTLS_SSL_TRANSPORT_STREAM,
+		MBEDTLS_SSL_PRESET_DEFAULT);
+	if (ret) {
+		printf("defaults failed\n");
+		return -1;
+	}
+	mbedtls_ssl_conf_rng(&stls.conf, mbedtls_ctr_drbg_random, &stls.ctr_drbg);
+	mbedtls_ssl_conf_dbg(&stls.conf, tls_debug, NULL);
+	mbedtls_debug_set_threshold(1);
+
+	mbedtls_ssl_conf_ca_chain(&stls.conf, stls.cacert.next, NULL);
+	ret = mbedtls_ssl_conf_own_cert(&stls.conf, &stls.srvcert, &stls.pkey);
+	if (ret) {
+		printf("setting own cert failed\n");
+		return -1;
 	}
 
-	return fd;
+	ret = mbedtls_net_bind(&stls.fd, NULL, port, MBEDTLS_NET_PROTO_TCP);
+	if (ret) {
+		printf("bind failed\n");
+		return -1;
+	}
 
-err_close:
-	close(fd);
-	return -1;
+	return stls.fd.fd;
 }
 
-static int writeall(int fd, const void *data, size_t len)
+static int tls_client_write(struct client *c, const void *data, size_t len)
 {
 	const uint8_t *buf = data;
 	while (len > 0) {
-		ssize_t r = write(fd, buf, len);
+		ssize_t r = mbedtls_ssl_write(&c->ssl, buf, len);
 		if (r <= 0)
 			return -1;
 
@@ -108,16 +172,16 @@ static int check_basic_auth(const char *req)
 	return 0;
 }
 
-static int client_handler(int fd)
+static int tls_client_read(struct client *c)
 {
-	ssize_t len = read(fd, rbuf, sizeof(rbuf));
+	ssize_t len = mbedtls_ssl_read(&c->ssl, (uint8_t *)rbuf, sizeof(rbuf));
 	if (len <= 0)
 		return -1;
 
 	/* parse the request */
 	rbuf[len] = 0;
 	if (strncmp(rbuf, "GET /", 5) != 0) {
-		writeall(fd, res_500, strlen(res_500));
+		tls_client_write(c, res_500, strlen(res_500));
 		return -1;
 	}
 
@@ -131,7 +195,7 @@ static int client_handler(int fd)
 
 	/* authentication */
 	if (!end || check_basic_auth(end+1) < 0) {
-		writeall(fd, res_401, strlen(res_401));
+		tls_client_write(c, res_401, strlen(res_401));
 		return -1;
 	}
 
@@ -142,12 +206,61 @@ static int client_handler(int fd)
 			break;
 	if (e->path) {
 		printf("200 %s\n", url);
-		writeall(fd, res_200, strlen(res_200));
-		writeall(fd, e->data, e->size);
+		tls_client_write(c, res_200, strlen(res_200));
+		tls_client_write(c, e->data, e->size);
 	} else {
 		printf("404 %s\n", url);
-		writeall(fd, res_404, strlen(res_404));
+		tls_client_write(c, res_404, strlen(res_404));
 	}
+	return -1;
+}
+
+static int tls_client_handshake(struct client *c)
+{
+	int ret = mbedtls_ssl_handshake(&c->ssl);
+	if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+	    ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+		return 0;
+
+	if (ret) {
+		printf("handshake failed\n");
+		return -1;
+	}
+
+	c->handler = tls_client_read;
+	return 0;
+}
+
+static int tls_server_accept(void)
+{
+	int ret;
+	mbedtls_net_context client;
+
+	mbedtls_net_init(&client);
+	ret = mbedtls_net_accept(&stls.fd, &client, NULL, 0, NULL);
+	if (ret || ccnt >= MAXCLIENTS) {
+		printf("max clients\n");
+		goto err;
+	}
+
+	struct client *c = ctls + ccnt;
+	c->fd = client;
+	mbedtls_ssl_init(&c->ssl);
+
+	ret = mbedtls_ssl_setup(&c->ssl, &stls.conf);
+	if (ret) {
+		printf("cannot setup the ssl session\n");
+		goto err;
+	}
+
+	mbedtls_ssl_set_bio(&c->ssl, &c->fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+	c->handler = tls_client_handshake;
+	ccnt++;
+	return 0;
+
+err:
+	mbedtls_net_free(&client);
 	return -1;
 }
 
@@ -155,7 +268,7 @@ static void webserver_task(void *params)
 {
 	for (;;) {
 		ccnt = 0;
-		int sfd = server_listen(BIND_PORT);
+		int sfd = tls_server_listen("8445");
 		if (sfd < 0) {
 			printf("server listen failed\n");
 			continue;
@@ -166,9 +279,9 @@ static void webserver_task(void *params)
 			FD_ZERO(&rfds);
 			FD_SET(sfd, &rfds);
 			for (size_t i = 0; i < ccnt; i++) {
-				FD_SET(cfd[i], &rfds);
-				if (max < cfd[i])
-					max = cfd[i];
+				FD_SET(ctls[i].fd.fd, &rfds);
+				if (max < ctls[i].fd.fd)
+					max = ctls[i].fd.fd;
 			}
 
 			if (select(max+1, &rfds, NULL, NULL, NULL) < 0) {
@@ -177,25 +290,17 @@ static void webserver_task(void *params)
 			}
 
 			if (FD_ISSET(sfd, &rfds)) {
-				int fd = accept(sfd, NULL, NULL);
-				if (fd < 0)
+				if (tls_server_accept() < 0)
 					break;
-
-				if (ccnt >= MAXCLIENTS) {
-					printf("max clients reached\n");
-					close(fd);
-				} else {
-					cfd[ccnt] = fd;
-					ccnt++;
-				}
 			}
 			for (size_t i = 0; i < ccnt; ) {
-				if (FD_ISSET(cfd[i], &rfds) &&
-				    client_handler(cfd[i]) < 0) {
-					close(cfd[i]);
+				if (FD_ISSET(ctls[i].fd.fd, &rfds) &&
+				    ctls[i].handler(ctls+i) < 0) {
+					mbedtls_ssl_close_notify(&ctls[i].ssl);
+					mbedtls_net_free(&ctls[i].fd);
 					ccnt--;
-					memmove(cfd + i, cfd + i + 1,
-						(ccnt - i)*sizeof(cfd[0]));
+					memmove(ctls + i, ctls + i + 1,
+						(ccnt - i)*sizeof(ctls[0]));
 				} else {
 					i++;
 				}
@@ -203,9 +308,19 @@ static void webserver_task(void *params)
 		}
 
 		/* close all the sockets */
-		for (size_t i = 0; i < ccnt; i++)
-			close(cfd[i]);
-		close(sfd);
+		for (size_t i = 0; i < ccnt; i++) {
+			mbedtls_ssl_close_notify(&ctls[i].ssl);
+			mbedtls_net_free(&ctls[i].fd);
+		}
+
+		/* free the structures */
+		mbedtls_net_free(&stls.fd);
+		mbedtls_pk_free(&stls.pkey);
+		mbedtls_x509_crt_free(&stls.srvcert);
+		mbedtls_x509_crt_free(&stls.cacert);
+		mbedtls_ssl_config_free(&stls.conf);
+		mbedtls_ctr_drbg_free(&stls.ctr_drbg);
+		mbedtls_entropy_free(&stls.entropy);
 	}
 }
 

@@ -1,7 +1,7 @@
 CFLAGS = -Wall -Werror -Wshadow -Wstrict-aliasing=2 \
 	-Wstrict-overflow -Wno-missing-field-initializers \
 	-pedantic -march=native -D_DEFAULT_SOURCE -std=gnu99 -O2 -march=native
-LIBS =
+LIBS = -lmbedtls -lmbedcrypto -lmbedx509
 SRCS =
 OBJS = ${SRCS:.c=.o}
 DESTDIR = /usr/local
@@ -13,7 +13,7 @@ all: serve
 fsdata.c: fs
 	perl makefsdata.pl
 
-serve: serve.o fsdata.o base64.o
+serve: serve.o fsdata.o base64.o certs.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LIBS)
 
 clean:
