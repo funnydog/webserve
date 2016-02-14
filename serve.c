@@ -64,17 +64,19 @@ err_close:
 	return -1;
 }
 
-static void writeall(int fd, const void *data, size_t len)
+static int writeall(int fd, const void *data, size_t len)
 {
 	const uint8_t *buf = data;
 	while (len > 0) {
 		ssize_t r = write(fd, buf, len);
 		if (r <= 0)
-			break;
+			return -1;
 
 		buf += r;
 		len -= r;
 	}
+
+	return 0;
 }
 
 static int check_basic_auth(const char *req)
