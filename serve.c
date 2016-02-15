@@ -1,7 +1,9 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -19,7 +21,6 @@
 #include "base64.h"
 #include "fsdata.h"
 
-#define BIND_PORT 8080
 #define MAXCLIENTS 4
 
 static const char *seed = "this is a secret!!1";
@@ -55,8 +56,112 @@ static const char *res_401 =
 
 static const char *res_404 = "HTTP/1.0 404 Not Found\r\n";
 static const char *res_500 = "HTTP/1.0 500 Server Error\r\n";
-
 static const char *authres = "Authorization: Basic ";
+
+const char *reqtype[] = {
+	"GET",
+	"HEAD",
+	"POST",
+	"PUT",
+	"DELETE",
+	"CONNECT",
+	"OPTIONS",
+	"TRACE",
+};
+
+enum {
+	REQ_GET = 0,
+	REQ_HEAD,
+	REQ_POST,
+	REQ_PUT,
+	REQ_DELETE,
+	REQ_CONNECT,
+	REQ_OPTIONS,
+	REQ_TRACE,
+	REQ_MAX,
+};
+
+struct request
+{
+	int type;
+	const char *uri;
+	const char *headers[10];
+	const char *message;
+};
+
+static char *chomp(char **start)
+{
+	char *line = *start;
+	char *end = strchr(line, '\r');
+	if (!end) {
+		end = strchr(line, '\n');
+		if (!end)
+			return NULL;
+	}
+	while (*end == '\r' || *end == '\n')
+		*end++ = 0;
+
+	*start = end;
+	return line;
+}
+
+static int parse_request(struct request *r, char *req)
+{
+	/* type & uri */
+	char *line = chomp(&req);
+	if (!line)
+		return -1;
+
+	int i;
+	for (i = 0; i < REQ_MAX; i++) {
+		if (strncmp(line, reqtype[i], strlen(reqtype[i])) == 0)
+			break;
+	}
+	if (i == REQ_MAX)
+		return -1;
+
+	r->type = i;
+	line += strlen(reqtype[i]);
+	while (isspace(*line))
+		line++;
+
+	char *end = line;
+	while (*end && !isspace(*end))
+		end++;
+	if (*end == 0)
+		return -1;
+
+	*end = 0;
+	r->uri = line;
+
+	/* headers */
+	i = 0;
+	while ((line = chomp(&req))) {
+		if (line[0] == 0)
+			break;
+
+		if (i < 10) {
+			r->headers[i] = line;
+			i++;
+		}
+	}
+	for (; i < 10; i++)
+		r->headers[i] = NULL;
+
+	/* message */
+	r->message = line ? req : NULL;
+
+#if 0
+	printf("type: %s\nuri: %s\n", reqtype[r->type], r->uri);
+	for (i = 0; i < 10; i++) {
+		if (r->headers[i])
+			printf("header: %s\n", r->headers[i]);
+	}
+	printf("message: %s\n", r->message);
+#endif
+
+	return 0;
+}
 
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *str)
 {
@@ -143,9 +248,16 @@ static int tls_client_write(struct client *c, const void *data, size_t len)
 	return 0;
 }
 
-static int check_basic_auth(const char *req)
+static int check_basic_auth(struct request *r)
 {
-	char *auth = strstr(req, authres);
+	char *auth = NULL;
+	for (int i = 0; i < 10; i++) {
+		if (r->headers[i]) {
+			auth = strstr(r->headers[i], authres);
+			if (auth)
+				break;
+		}
+	}
 	if (!auth)
 		return -1;
 
@@ -178,23 +290,17 @@ static int tls_client_read(struct client *c)
 	if (len <= 0)
 		return -1;
 
-	/* parse the request */
-	rbuf[len] = 0;
-	if (strncmp(rbuf, "GET /", 5) != 0) {
-		tls_client_write(c, res_500, strlen(res_500));
-		return -1;
-	}
+	struct request req;
+	if (parse_request(&req, rbuf) < 0)
+		goto err_500;
 
-	char *url = rbuf + 4;
-	char *end = strchr(url, ' ');
-	if (end)
-		*end = 0;
+	if (req.type != REQ_GET)
+		goto err_500;
 
-	if (url+1 == end)
-		url = "/index.html";
+	if (strcmp(req.uri, "/") == 0)
+		req.uri = "/index.html";
 
-	/* authentication */
-	if (!end || check_basic_auth(end+1) < 0) {
+	if (check_basic_auth(&req) < 0) {
 		tls_client_write(c, res_401, strlen(res_401));
 		return -1;
 	}
@@ -202,16 +308,21 @@ static int tls_client_read(struct client *c)
 	/* serve the resource */
 	struct fsdata *e;
 	for (e = rootfs; e->path; e++)
-		if (strcmp(url, e->path) == 0)
+		if (strcmp(req.uri, e->path) == 0)
 			break;
 	if (e->path) {
-		printf("200 %s\n", url);
+		printf("200 %s\n", req.uri);
 		tls_client_write(c, res_200, strlen(res_200));
 		tls_client_write(c, e->data, e->size);
 	} else {
-		printf("404 %s\n", url);
+		printf("404 %s\n", req.uri);
 		tls_client_write(c, res_404, strlen(res_404));
 	}
+	return -1;
+
+err_500:
+	printf("500\n");
+	tls_client_write(c, res_500, strlen(res_500));
 	return -1;
 }
 
@@ -268,7 +379,7 @@ static void webserver_task(void *params)
 {
 	for (;;) {
 		ccnt = 0;
-		int sfd = tls_server_listen("8445");
+		int sfd = tls_server_listen("8443");
 		if (sfd < 0) {
 			printf("server listen failed\n");
 			continue;
