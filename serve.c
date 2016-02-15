@@ -63,7 +63,7 @@ static void tls_debug(void *ctx, int level, const char *file, int line, const ch
 	printf("%s:%04d: %s", file, line, str);
 }
 
-static int tls_server_listen(const char *port)
+static int tls_server_listen(const char *host, const char *port)
 {
 	int ret = mbedtls_ctr_drbg_seed(
 		&stls.ctr_drbg,
@@ -111,7 +111,7 @@ static int tls_server_listen(const char *port)
 		return -1;
 	}
 
-	ret = mbedtls_net_bind(&stls.fd, NULL, port, MBEDTLS_NET_PROTO_TCP);
+	ret = mbedtls_net_bind(&stls.fd, host, port, MBEDTLS_NET_PROTO_TCP);
 	if (ret) {
 		printf("bind failed\n");
 		return -1;
@@ -295,7 +295,7 @@ static void webserver_task(void *params)
 	for (;;) {
 		ccnt = 0;
 		tls_server_init(&stls);
-		int sfd = tls_server_listen("8443");
+		int sfd = tls_server_listen("0", "8443");
 		if (sfd < 0) {
 			printf("server listen failed\n");
 			continue;
