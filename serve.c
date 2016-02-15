@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -24,6 +25,14 @@
 #define MAXCLIENTS 4
 
 static const char *seed = "this is a secret!!1";
+
+/* username: root
+ * password: password
+ */
+static const char *username = "root";
+static const char *pwdhash =
+	"$6$cleverboy$Y5dVMplYCby7rYFbzMSvsdCUJOM7qWMfqzf2LOZ"
+	"vi/sITnuMzYTj0kd8Z/JWiR0Gmt/VmNQ7v1AcqtoA8XVV8.";
 
 static struct client
 {
@@ -164,8 +173,7 @@ static int check_basic_auth(struct request *r)
 
 	*pass++ = 0;
 
-	/* TODO: need to be badly improved */
-	if (strcmp(user, "root") || strcmp(pass, "password"))
+	if (strcmp(user, username) || strcmp(crypt(pass, pwdhash), pwdhash))
 		return -1;
 
 	return 0;
