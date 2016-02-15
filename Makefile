@@ -13,7 +13,7 @@ all: serve
 fsdata.c: fs
 	perl makefsdata.pl
 
-serve: serve.o fsdata.o base64.o certs.c
+serve: serve.o fsdata.o base64.o certs.o request.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LIBS)
 
 clean:

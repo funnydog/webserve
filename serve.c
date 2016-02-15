@@ -3,7 +3,6 @@
 #include <sys/select.h>
 
 #include <arpa/inet.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -20,6 +19,7 @@
 #include "certs.h"
 #include "base64.h"
 #include "fsdata.h"
+#include "request.h"
 
 #define MAXCLIENTS 4
 
@@ -57,111 +57,6 @@ static const char *res_401 =
 static const char *res_404 = "HTTP/1.0 404 Not Found\r\n";
 static const char *res_500 = "HTTP/1.0 500 Server Error\r\n";
 static const char *authres = "Authorization: Basic ";
-
-const char *reqtype[] = {
-	"GET",
-	"HEAD",
-	"POST",
-	"PUT",
-	"DELETE",
-	"CONNECT",
-	"OPTIONS",
-	"TRACE",
-};
-
-enum {
-	REQ_GET = 0,
-	REQ_HEAD,
-	REQ_POST,
-	REQ_PUT,
-	REQ_DELETE,
-	REQ_CONNECT,
-	REQ_OPTIONS,
-	REQ_TRACE,
-	REQ_MAX,
-};
-
-struct request
-{
-	int type;
-	const char *uri;
-	const char *headers[10];
-	const char *message;
-};
-
-static char *chomp(char **start)
-{
-	char *line = *start;
-	char *end = strchr(line, '\r');
-	if (!end) {
-		end = strchr(line, '\n');
-		if (!end)
-			return NULL;
-	}
-	while (*end == '\r' || *end == '\n')
-		*end++ = 0;
-
-	*start = end;
-	return line;
-}
-
-static int parse_request(struct request *r, char *req)
-{
-	/* type & uri */
-	char *line = chomp(&req);
-	if (!line)
-		return -1;
-
-	int i;
-	for (i = 0; i < REQ_MAX; i++) {
-		if (strncmp(line, reqtype[i], strlen(reqtype[i])) == 0)
-			break;
-	}
-	if (i == REQ_MAX)
-		return -1;
-
-	r->type = i;
-	line += strlen(reqtype[i]);
-	while (isspace(*line))
-		line++;
-
-	char *end = line;
-	while (*end && !isspace(*end))
-		end++;
-	if (*end == 0)
-		return -1;
-
-	*end = 0;
-	r->uri = line;
-
-	/* headers */
-	i = 0;
-	while ((line = chomp(&req))) {
-		if (line[0] == 0)
-			break;
-
-		if (i < 10) {
-			r->headers[i] = line;
-			i++;
-		}
-	}
-	for (; i < 10; i++)
-		r->headers[i] = NULL;
-
-	/* message */
-	r->message = line ? req : NULL;
-
-#if 0
-	printf("type: %s\nuri: %s\n", reqtype[r->type], r->uri);
-	for (i = 0; i < 10; i++) {
-		if (r->headers[i])
-			printf("header: %s\n", r->headers[i]);
-	}
-	printf("message: %s\n", r->message);
-#endif
-
-	return 0;
-}
 
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *str)
 {
