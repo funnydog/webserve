@@ -37,7 +37,7 @@ static fd_set rfds;
 static char rbuf[1024];
 
 /* TLS variables */
-static struct
+static struct server
 {
 	mbedtls_net_context fd;
 	mbedtls_entropy_context entropy;
@@ -170,14 +170,6 @@ static void tls_debug(void *ctx, int level, const char *file, int line, const ch
 
 static int tls_server_listen(const char *port)
 {
-	mbedtls_net_init(&stls.fd);
-	mbedtls_entropy_init(&stls.entropy);
-	mbedtls_ctr_drbg_init(&stls.ctr_drbg);
-	mbedtls_ssl_config_init(&stls.conf);
-	mbedtls_x509_crt_init(&stls.cacert);
-	mbedtls_x509_crt_init(&stls.srvcert);
-	mbedtls_pk_init(&stls.pkey);
-
 	int ret = mbedtls_ctr_drbg_seed(
 		&stls.ctr_drbg,
 		mbedtls_entropy_func,
@@ -342,6 +334,12 @@ static int tls_client_handshake(struct client *c)
 	return 0;
 }
 
+static void tls_client_free(struct client *c)
+{
+	mbedtls_ssl_close_notify(&c->ssl);
+	mbedtls_net_free(&c->fd);
+}
+
 static int tls_server_accept(void)
 {
 	int ret;
@@ -375,10 +373,33 @@ err:
 	return -1;
 }
 
+static void tls_server_init(struct server *s)
+{
+	mbedtls_net_init(&s->fd);
+	mbedtls_entropy_init(&s->entropy);
+	mbedtls_ctr_drbg_init(&s->ctr_drbg);
+	mbedtls_ssl_config_init(&s->conf);
+	mbedtls_x509_crt_init(&s->cacert);
+	mbedtls_x509_crt_init(&s->srvcert);
+	mbedtls_pk_init(&s->pkey);
+}
+
+static void tls_server_free(struct server *s)
+{
+	mbedtls_net_free(&s->fd);
+	mbedtls_pk_free(&s->pkey);
+	mbedtls_x509_crt_free(&s->srvcert);
+	mbedtls_x509_crt_free(&s->cacert);
+	mbedtls_ssl_config_free(&s->conf);
+	mbedtls_ctr_drbg_free(&s->ctr_drbg);
+	mbedtls_entropy_free(&s->entropy);
+}
+
 static void webserver_task(void *params)
 {
 	for (;;) {
 		ccnt = 0;
+		tls_server_init(&stls);
 		int sfd = tls_server_listen("8443");
 		if (sfd < 0) {
 			printf("server listen failed\n");
@@ -407,8 +428,7 @@ static void webserver_task(void *params)
 			for (size_t i = 0; i < ccnt; ) {
 				if (FD_ISSET(ctls[i].fd.fd, &rfds) &&
 				    ctls[i].handler(ctls+i) < 0) {
-					mbedtls_ssl_close_notify(&ctls[i].ssl);
-					mbedtls_net_free(&ctls[i].fd);
+					tls_client_free(ctls + i);
 					ccnt--;
 					memmove(ctls + i, ctls + i + 1,
 						(ccnt - i)*sizeof(ctls[0]));
@@ -418,20 +438,12 @@ static void webserver_task(void *params)
 			}
 		}
 
-		/* close all the sockets */
-		for (size_t i = 0; i < ccnt; i++) {
-			mbedtls_ssl_close_notify(&ctls[i].ssl);
-			mbedtls_net_free(&ctls[i].fd);
-		}
+		/* close all the clients */
+		for (size_t i = 0; i < ccnt; i++)
+			tls_client_free(ctls + i);
 
 		/* free the structures */
-		mbedtls_net_free(&stls.fd);
-		mbedtls_pk_free(&stls.pkey);
-		mbedtls_x509_crt_free(&stls.srvcert);
-		mbedtls_x509_crt_free(&stls.cacert);
-		mbedtls_ssl_config_free(&stls.conf);
-		mbedtls_ctr_drbg_free(&stls.ctr_drbg);
-		mbedtls_entropy_free(&stls.entropy);
+		tls_server_free(&stls);
 	}
 }
 
