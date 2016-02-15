@@ -12,23 +12,15 @@ sub printhexfile {
 
     open my $fh, "<", $path or die "Cannot read '$path': $!\n";
 
-    print $out "const uint8_t ${varname}[] = {";
+    print $out "const uint8_t ${varname}[] = ";
 
-    my $i = 0;
-    my $data;
-    while(read($fh, $data, 1)) {
-	if ($i % 10 == 0) {
-	    print $out "\n\t";
-	} else {
-	    print $out " ";
-	}
-
-        printf $out "%#.02x,", unpack("C", $data);
-	$i++;
+    while(<$fh>) {
+	chomp;
+	print $out "\n\t\"$_\\n\"";
     }
     close $fh;
 
-    print $out "\n0};\n";
+    print $out ";\n";
     print $out "const size_t ${varname}_len = sizeof(${varname});\n\n";
 }
 
