@@ -60,7 +60,7 @@ static const char *authres = "Authorization: Basic ";
 
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *str)
 {
-	printf("%s:%04d: %s\n", file, line, str);
+	printf("%s:%04d: %s", file, line, str);
 }
 
 static int tls_server_listen(const char *port)
