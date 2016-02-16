@@ -146,14 +146,7 @@ static int tls_client_write(struct client *c, const void *data, size_t len)
 
 static int check_basic_auth(struct request *r)
 {
-	char *auth = NULL;
-	for (int i = 0; i < 10; i++) {
-		if (r->headers[i]) {
-			auth = strstr(r->headers[i], authres);
-			if (auth)
-				break;
-		}
-	}
+	const char *auth = find_header(r, authres);
 	if (!auth)
 		return -1;
 

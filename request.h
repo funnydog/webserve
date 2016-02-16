@@ -22,5 +22,6 @@ struct request
 };
 
 int parse_request(struct request *r, char *req);
+const char *find_header(struct request *r, const char *header);
 
 #endif /* REQUEST_H */

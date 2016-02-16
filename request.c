@@ -88,3 +88,12 @@ int parse_request(struct request *r, char *req)
 
 	return 0;
 }
+
+const char *find_header(struct request *r, const char *header)
+{
+	for (int i = 0; i < 10; i++) {
+		if (r->headers[i] && strstr(r->headers[i], header))
+			return r->headers[i];
+	}
+	return NULL;
+}
